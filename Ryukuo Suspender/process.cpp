@@ -150,10 +150,10 @@ process::status process::get_status()
 	//NTSTATUS STATUS_SUCCESS = 0x00000000
 	//SystemProcessAndThreadInformation = 5
 	
-	dword system_process_info_size = 1024;
+	DWORD system_process_info_size = 1024;
 	std::unique_ptr<byte[]> system_process_info = std::make_unique<byte[]>(system_process_info_size);
 
-	dword needed = 0;
+	DWORD needed = 0;
 	NTSTATUS nt = NtQuerySystemInformation(SYSTEM_INFORMATION_CLASS::SystemProcessInformation, system_process_info.get(), system_process_info_size, &needed);
 	while (nt == 0xC0000004)
 	{
@@ -165,7 +165,7 @@ process::status process::get_status()
 	
 	if (nt == 0x00000000 && system_process_info.get() != nullptr)
 	{
-		std::function<dword(dword)> getmainthreadid = [](dword process_id) -> dword
+		std::function<DWORD(DWORD)> getmainthreadid = [](DWORD process_id) -> DWORD
 		{
 			HANDLE h = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
 			if (h == 0 || h == INVALID_HANDLE_VALUE)
@@ -206,14 +206,14 @@ process::status process::get_status()
 		if (psystemprocess->dUniqueProcessId == process_id)
 		{
 			SYSTEM_THREAD *psystemthread = &psystemprocess->aThreads;
-			dword threadid = getmainthreadid(process_id);
+			DWORD threadid = getmainthreadid(process_id);
 			if (threadid == 0)
 			{
 				return exception;
 			}
-			for (dword dw = 0; dw < psystemprocess->dThreadCount; ++dw, ++psystemthread)
+			for (DWORD dw = 0; dw < psystemprocess->dThreadCount; ++dw, ++psystemthread)
 			{
-				if (reinterpret_cast<dword>(psystemthread->Cid.UniqueThread) == threadid)
+				if (reinterpret_cast<DWORD>(psystemthread->Cid.UniqueThread) == threadid)
 				{
 					if (psystemthread->dThreadState == Waiting && psystemthread->WaitReason == Suspended)
 					{

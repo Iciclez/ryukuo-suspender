@@ -138,8 +138,8 @@ void mainwindow::set_message_handler()
 		std::vector<uint32_t> checkedlist = this->m_checklistview_processlist->get_checked_list();
 		for (uint32_t n : checkedlist)
 		{
-			uint32_t process_id = std::stoi(this->m_checklistview_processlist->text(n, 2));
-			handle process = OpenProcess(PROCESS_ALL_ACCESS, FALSE, process_id);
+			uintptr_t process_id = std::stoi(this->m_checklistview_processlist->text(n, 2));
+			HANDLE process = OpenProcess(PROCESS_ALL_ACCESS, FALSE, process_id);
 			if (!process)
 			{
 				l.log("[-] manual: openprocess error on process id: %d (%.08X)", process_id, process_id);
@@ -167,7 +167,7 @@ void mainwindow::set_message_handler()
 		for (const uint32_t n : checkedlist)
 		{
 			uint32_t process_id = std::stoi(this->m_checklistview_processlist->text(n, 2));
-			handle process = OpenProcess(PROCESS_ALL_ACCESS, FALSE, process_id);
+			HANDLE process = OpenProcess(PROCESS_ALL_ACCESS, FALSE, process_id);
 			if (!process)
 			{
 				l.log("[-] manual: openprocess error on process id: %d (%.08X)", process_id, process_id);
@@ -194,8 +194,8 @@ void mainwindow::set_message_handler()
 		std::vector<uint32_t> checkedlist = this->m_checklistview_processlist->get_checked_list();
 		for (const uint32_t n : checkedlist)
 		{
-			uint32_t process_id = std::stoi(this->m_checklistview_processlist->text(n, 2));
-			handle process = OpenProcess(PROCESS_ALL_ACCESS, FALSE, process_id);
+			uintptr_t process_id = std::stoi(this->m_checklistview_processlist->text(n, 2));
+			HANDLE process = OpenProcess(PROCESS_ALL_ACCESS, FALSE, process_id);
 			if (!process)
 			{
 				l.log("[-] manual: openprocess error on process id: %d (%.08X)", process_id, process_id);

@@ -3,10 +3,12 @@
 #include <TlHelp32.h>
 #include <algorithm>
 #include <cwctype>
+#include <fstream>
 #include <thread>
 
+
 /*
-dword external_loadlibraryexw_function(inject::loadlibraryexw_parameter *parameter)
+DWORD external_loadlibraryexw_function(inject::loadlibraryexw_parameter *parameter)
 {
 	return parameter->address(parameter->filename, parameter->file, parameter->flags) == 0;
 }
@@ -14,7 +16,7 @@ dword external_loadlibraryexw_function(inject::loadlibraryexw_parameter *paramet
 //doubling the real function size, safer as compiler optimization may produce different code
 size_t external_loadlibraryexw_function_size = 26 * 2;
 
-dword external_loadlibraryexa_function(inject::loadlibraryexa_parameter *parameter)
+DWORD external_loadlibraryexa_function(inject::loadlibraryexa_parameter *parameter)
 {
 	return parameter->address(parameter->filename, parameter->file, parameter->flags) == 0;
 }
@@ -22,7 +24,7 @@ dword external_loadlibraryexa_function(inject::loadlibraryexa_parameter *paramet
 //doubling the real function size, safer as compiler optimization may produce different code
 size_t external_loadlibraryexa_function_size = 26 * 2;
 
-dword external_ldrloaddll_function_(inject::ldrloaddll_parameter *parameter)
+DWORD external_ldrloaddll_function_(inject::ldrloaddll_parameter *parameter)
 {
 	parameter->rtlinitunicodestring(parameter->module_filename, parameter->filename);
 	return parameter->address(parameter->pathtofile, parameter->flags, parameter->module_filename, parameter->module_handle) != STATUS_SUCCESS;
@@ -34,10 +36,10 @@ size_t external_ldrloaddll_function_size = 42 * 2;
 
 extern "C"
 {
-	//dword external_loadlibraryex_function(inject::loadlibraryexw_parameter *parameter)
-	//dword external_loadlibraryex_function(inject::loadlibraryexa_parameter *parameter)
-	dword external_loadlibraryex_function(void* parameter);
-	dword external_ldrloaddll_function(inject::ldrloaddll_parameter* parameter);
+	//DWORD external_loadlibraryex_function(inject::loadlibraryexw_parameter *parameter)
+	//DWORD external_loadlibraryex_function(inject::loadlibraryexa_parameter *parameter)
+	DWORD external_loadlibraryex_function(void* parameter);
+	DWORD external_ldrloaddll_function(inject::ldrloaddll_parameter* parameter);
 }
 
 #ifdef _WIN64
@@ -48,12 +50,12 @@ size_t external_loadlibraryex_function_size = 26;
 size_t external_ldrloaddll_function_size = 43;
 #endif
 
-std::vector<dword> inject::get_process_id(const std::string & process_name)
+std::vector<DWORD> inject::get_process_id(const std::string& process_name)
 {
 	std::string process = process_name;
 	std::transform(process.begin(), process.end(), process.begin(), std::tolower);
 
-	std::vector<dword> process_id;
+	std::vector<DWORD> process_id;
 
 	HANDLE h = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
 	PROCESSENTRY32 p = { 0 };
@@ -89,97 +91,77 @@ inject::inject(injection_routine routine, injection_thread_function thread, bool
 	this->freeze_processes = freeze_processes;
 	this->error_handler = error_handler;
 
-	this->generic_injection = [&](std::function<void(handle h)> injection_procedure) -> bool
-	{
-		for (const std::pair<dword, handle> &p : processes)
+	this->generic_injection = [&](std::function<void(HANDLE h)> injection_procedure) -> bool
 		{
-			if (!p.first)
+			for (const std::pair<DWORD, HANDLE>& p : processes)
 			{
-				this->error_handler(injection_error::ERROR_INVALID_PROCESS_ID);
-				return false;
+				if (!p.first)
+				{
+					this->error_handler(injection_error::ERROR_INVALID_PROCESS_ID);
+					return false;
+				}
+
+				if (p.second == INVALID_HANDLE_VALUE || p.second == 0)
+				{
+					this->error_handler(injection_error::ERROR_INVALID_PROCESS_HANDLE);
+					return false;
+				}
+
+				injection_procedure(p.second);
 			}
 
-			if (p.second == INVALID_HANDLE_VALUE || p.second == 0)
-			{
-				this->error_handler(injection_error::ERROR_INVALID_PROCESS_HANDLE);
-				return false;
-			}
-
-			injection_procedure(p.second);
-		}
-
-		return true;
-	};
+			return true;
+		};
 }
 
-bool inject::get_handles()
+void inject::get_handles()
 {
-	for (dword id : this->process_id)
+	for (DWORD id : this->process_id)
 	{
 		this->processes[id] = OpenProcess(PROCESS_ALL_ACCESS, FALSE, id);
 	}
-	return true;
 }
 
-bool inject::createandhandleremotethread(handle h, const std::string & module_name, const std::string & function_name, lpvoid argument)
+void inject::with_remote_virtual_memory(HANDLE handle, uintptr_t size, const std::function<void(void*)>& function, const void* value_at_remote_memory)
 {
-	handle thread = createremotethread(h, module_name, function_name, argument);
+	void* remote_address = VirtualAllocEx(handle, NULL, size, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+	if (remote_address)
+	{
+		if (value_at_remote_memory != nullptr)
+		{
+			DWORD bytes_written = 0;
+			WriteProcessMemory(handle, remote_address, value_at_remote_memory, size, &bytes_written);
+		}
+		function(remote_address);
+		VirtualFreeEx(handle, remote_address, 0, MEM_RELEASE);
+	}
+}
+
+bool inject::remote_call(HANDLE h, const std::string& module_name, const std::string& function_name, void* argument)
+{
+	HANDLE thread = remote_thread(h, reinterpret_cast<DWORD>(GetProcAddress(GetModuleHandle(module_name.c_str()), function_name.c_str())), argument);
 	if (!thread)
 	{
 		return false;
 	}
 
 	WaitForSingleObject(thread, 4000);
-
 	return true;
 }
 
-bool inject::createandhandleremotethread(handle h, dword address, lpvoid argument)
+bool inject::remote_call(HANDLE h, DWORD address, void* argument)
 {
-	handle thread = createremotethread(h, address, argument);
+	HANDLE thread = remote_thread(h, address, argument);
 	if (!thread)
 	{
 		return false;
 	}
 
 	WaitForSingleObject(thread, 4000);
-
-
 	return true;
 }
 
-lpvoid inject::virtualallocex(handle h, int32_t size)
-{
-	return VirtualAllocEx(h, NULL, size, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
-}
-
-bool inject::virtualfree(handle h, lpvoid memory_region)
-{
-	return VirtualFreeEx(h, memory_region, 0, MEM_RELEASE) != FALSE;
-}
-
-bool inject::writeprocessmemory(handle h, const std::string & dll, int32_t dll_size, lpvoid memory_region)
-{
-	SIZE_T written = 0;
-	return (WriteProcessMemory(h, memory_region, dll.c_str(), dll_size, &written) != FALSE) &&
-		static_cast<dword>(dll_size) == written;
-}
-
-bool inject::writeprocessmemory(handle h, const std::wstring & dll, int32_t dll_size, lpvoid memory_region)
-{
-	SIZE_T written = 0;
-	return (WriteProcessMemory(h, memory_region, dll.c_str(), dll_size, &written) != FALSE) &&
-		static_cast<dword>(dll_size) == written;
-}
-
-bool inject::writeprocessmemory(handle h, lpvoid memory, int32_t memory_size, lpvoid memory_region)
-{
-	SIZE_T written = 0;
-	return (WriteProcessMemory(h, memory_region, memory, memory_size, &written) != FALSE) &&
-		static_cast<dword>(memory_size) == written;
-}
-
-handle inject::createremotethread(handle h, dword address, lpvoid argument)
+HANDLE inject::remote_thread(HANDLE h, DWORD address, void* argument)
 {
 	switch (this->thread)
 	{
@@ -191,7 +173,7 @@ handle inject::createremotethread(handle h, dword address, lpvoid argument)
 
 	case injection_thread_function::NTCREATETHREADEX:
 	{
-		typedef NTSTATUS(NTAPI * NtCreateThreadEx)(
+		typedef NTSTATUS(NTAPI* NtCreateThreadEx)(
 			PHANDLE                 ThreadHandle,
 			ACCESS_MASK             DesiredAccess,
 			LPVOID                  ObjectAttributes,
@@ -205,17 +187,17 @@ handle inject::createremotethread(handle h, dword address, lpvoid argument)
 			LPVOID                  Unknown3
 			);
 
-		handle remote_thread = 0;
+		HANDLE remote_thread = 0;
 
 		reinterpret_cast<NtCreateThreadEx>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtCreateThreadEx"))
-			(&remote_thread, GENERIC_ALL, NULL, h, reinterpret_cast<LPTHREAD_START_ROUTINE>(address), argument, 
+			(&remote_thread, GENERIC_ALL, NULL, h, reinterpret_cast<LPTHREAD_START_ROUTINE>(address), argument,
 				FALSE, NULL, NULL, NULL, NULL);
 
 		return remote_thread;
 	}
 	case injection_thread_function::RTLCREATEUSERTHREAD:
 	{
-		typedef NTSTATUS(NTAPI * RtlCreateUserThread)(
+		typedef NTSTATUS(NTAPI* RtlCreateUserThread)(
 			IN HANDLE               ProcessHandle,
 			IN PSECURITY_DESCRIPTOR SecurityDescriptor OPTIONAL,
 			IN BOOLEAN              CreateSuspended,
@@ -225,14 +207,14 @@ handle inject::createremotethread(handle h, dword address, lpvoid argument)
 			IN PVOID                StartAddress,
 			IN PVOID                StartParameter OPTIONAL,
 			OUT PHANDLE             ThreadHandle,
-			OUT CLIENT_ID *         ClientID
+			OUT CLIENT_ID* ClientID
 			);
 
-		handle remote_thread = 0;
+		HANDLE remote_thread = 0;
 		CLIENT_ID client_id = { 0 };
 
 		reinterpret_cast<RtlCreateUserThread>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlCreateUserThread"))
-			(h, 0, FALSE, 0, 0, 0, reinterpret_cast<lpvoid>(address), argument,
+			(h, 0, FALSE, 0, 0, 0, reinterpret_cast<void*>(address), argument,
 				&remote_thread, &client_id);
 
 		return remote_thread;
@@ -242,72 +224,28 @@ handle inject::createremotethread(handle h, dword address, lpvoid argument)
 	return 0;
 }
 
-handle inject::createremotethread(handle h, const std::string &module_name, const std::string &function_name, lpvoid argument)
+std::vector<uint8_t> inject::read_binary_file(const std::string& file_path)
 {
-	return createremotethread(h, reinterpret_cast<dword>(GetProcAddress(GetModuleHandle(module_name.c_str()), function_name.c_str())), argument);
+	std::ifstream fs(file_path, std::ios::binary);
+	fs.unsetf(std::ios::skipws);
+
+	fs.seekg(0, std::ios::end);
+	std::streampos file_size = fs.tellg();
+	fs.seekg(0, std::ios::beg);
+
+	std::vector<uint8_t> bytes;
+	bytes.reserve(static_cast<size_t>(file_size));
+	bytes.insert(bytes.begin(), std::istream_iterator<uint8_t>(fs), std::istream_iterator<uint8_t>());
+
+	return bytes;
 }
 
-bool inject::waitforsingleobject(handle h)
+DWORD inject::get_dll_main(void* memory, platform platform_type)
 {
-	std::thread([h]()
-	{
-		WaitForSingleObject(h, INFINITE);
+	uintptr_t address = reinterpret_cast<uintptr_t>(memory);
+	uintptr_t export_dir = address + reinterpret_cast<PIMAGE_DOS_HEADER>(address)->e_lfanew;
 
-		if (h)
-		{
-			CloseHandle(h);
-		}
-
-	}).detach();
-}
-
-
-handle inject::createfile(const std::string & file)
-{
-	return CreateFileA(file.c_str(), GENERIC_READ, 0, 0, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
-}
-
-bool inject::closehandle(handle h)
-{
-	if (h)
-	{
-		return CloseHandle(h) != FALSE;
-	}
-	return true;
-}
-
-dword inject::getfilesize(handle h)
-{
-	return GetFileSize(h, 0);
-}
-
-lpvoid inject::heapalloc(dword size)
-{
-	return HeapAlloc(GetProcessHeap(), 0, size);
-}
-
-bool inject::heapfree(lpvoid memory)
-{
-	if (memory)
-	{
-		return HeapFree(GetProcessHeap(), 0, memory) != FALSE;
-	}
-
-	return true;
-}
-
-bool inject::readfile(handle h, lpvoid memory, dword filesize)
-{
-	dword read = 0;
-	return ReadFile(h, memory, filesize, &read, 0) != FALSE;
-}
-
-dword inject::getdllmain(lpvoid memory, platform platform_type)
-{
-	uint32_t address = reinterpret_cast<uint32_t>(memory);
-	uint32_t export_dir = address + reinterpret_cast<PIMAGE_DOS_HEADER>(address)->e_lfanew;
-
-	switch ((reinterpret_cast<PIMAGE_NT_HEADERS>(export_dir))->OptionalHeader.Magic) 
+	switch ((reinterpret_cast<PIMAGE_NT_HEADERS>(export_dir))->OptionalHeader.Magic)
 	{
 		//PE32
 	case 0x010B:
@@ -327,66 +265,66 @@ dword inject::getdllmain(lpvoid memory, platform platform_type)
 
 	}
 
-	std::function<dword(dword, uint32_t)> rva_to_offset = [](dword rva, uint32_t base_address) -> dword 
-	{
-		PIMAGE_NT_HEADERS nt_header = reinterpret_cast<PIMAGE_NT_HEADERS>(base_address + ((PIMAGE_DOS_HEADER)base_address)->e_lfanew);
-		PIMAGE_SECTION_HEADER section_header = reinterpret_cast<PIMAGE_SECTION_HEADER>(reinterpret_cast<uint32_t>(&nt_header->OptionalHeader) + nt_header->FileHeader.SizeOfOptionalHeader);
-
-
-		if (rva < section_header[0].PointerToRawData) 
+	std::function<DWORD(DWORD, uintptr_t)> rva_to_offset = [](DWORD rva, uintptr_t base_address) -> DWORD
 		{
-			return rva;
-		}
+			PIMAGE_NT_HEADERS nt_header = reinterpret_cast<PIMAGE_NT_HEADERS>(base_address + ((PIMAGE_DOS_HEADER)base_address)->e_lfanew);
+			PIMAGE_SECTION_HEADER section_header = reinterpret_cast<PIMAGE_SECTION_HEADER>(reinterpret_cast<uintptr_t>(&nt_header->OptionalHeader) + nt_header->FileHeader.SizeOfOptionalHeader);
 
-		for (uint16_t i = 0; i < nt_header->FileHeader.NumberOfSections; i++) 
-		{
-			if (rva >= section_header[i].VirtualAddress &&
-				rva < (section_header[i].VirtualAddress + section_header[i].SizeOfRawData)) 
+
+			if (rva < section_header[0].PointerToRawData)
 			{
-				return (rva - section_header[i].VirtualAddress + section_header[i].PointerToRawData);
+				return rva;
 			}
-		}
 
-		return static_cast<dword>(0);
+			for (uint16_t i = 0; i < nt_header->FileHeader.NumberOfSections; i++)
+			{
+				if (rva >= section_header[i].VirtualAddress &&
+					rva < (section_header[i].VirtualAddress + section_header[i].SizeOfRawData))
+				{
+					return (rva - section_header[i].VirtualAddress + section_header[i].PointerToRawData);
+				}
+			}
 
-	};
+			return static_cast<DWORD>(0);
 
-	export_dir = address + rva_to_offset((reinterpret_cast<PIMAGE_DATA_DIRECTORY>(reinterpret_cast<dword>(&(reinterpret_cast<PIMAGE_NT_HEADERS>(export_dir))->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT])))->VirtualAddress, address);
+		};
 
-	dword name_array = address + rva_to_offset(reinterpret_cast<PIMAGE_EXPORT_DIRECTORY>(export_dir)->AddressOfNames, address);;
-	dword name_ordinals = address + rva_to_offset(reinterpret_cast<PIMAGE_EXPORT_DIRECTORY>(export_dir)->AddressOfNameOrdinals, address);
-	dword i = reinterpret_cast<PIMAGE_EXPORT_DIRECTORY>(export_dir)->NumberOfNames;
+	export_dir = address + rva_to_offset((reinterpret_cast<PIMAGE_DATA_DIRECTORY>(reinterpret_cast<DWORD>(&(reinterpret_cast<PIMAGE_NT_HEADERS>(export_dir))->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT])))->VirtualAddress, address);
 
-	while (i--) 
+	DWORD name_array = address + rva_to_offset(reinterpret_cast<PIMAGE_EXPORT_DIRECTORY>(export_dir)->AddressOfNames, address);;
+	DWORD name_ordinals = address + rva_to_offset(reinterpret_cast<PIMAGE_EXPORT_DIRECTORY>(export_dir)->AddressOfNameOrdinals, address);
+	DWORD i = reinterpret_cast<PIMAGE_EXPORT_DIRECTORY>(export_dir)->NumberOfNames;
+
+	while (i--)
 	{
-		if (strstr(reinterpret_cast<char*>(address + rva_to_offset(*reinterpret_cast<dword*>(name_array), address)), "DllMain") != NULL) 
+		if (strstr(reinterpret_cast<char*>(address + rva_to_offset(*reinterpret_cast<DWORD*>(name_array), address)), "dll_main") != NULL)
 		{
-			return rva_to_offset(*reinterpret_cast<dword*>(address + rva_to_offset(reinterpret_cast<PIMAGE_EXPORT_DIRECTORY>(export_dir)->AddressOfFunctions, address) + (*reinterpret_cast<word*>(name_ordinals) * sizeof(DWORD))), address);
+			return rva_to_offset(*reinterpret_cast<DWORD*>(address + rva_to_offset(reinterpret_cast<PIMAGE_EXPORT_DIRECTORY>(export_dir)->AddressOfFunctions, address) + (*reinterpret_cast<WORD*>(name_ordinals) * sizeof(DWORD))), address);
 		}
-		name_array += sizeof(dword);
-		name_ordinals += sizeof(word);
+		name_array += sizeof(DWORD);
+		name_ordinals += sizeof(WORD);
 	}
 
 	return 0;
 }
 
-inject::inject(const std::string & process_name, injection_routine routine, injection_thread_function thread, bool freeze, std::function<void(injection_error)> error_handler)
+inject::inject(const std::string& process_name, injection_routine routine, injection_thread_function thread, bool freeze, std::function<void(injection_error)> error_handler)
 	: inject(routine, thread, freeze, error_handler)
 {
 	this->process_id = get_process_id(process_name);
 	this->get_handles();
 }
 
-inject::inject(hwnd window, injection_routine routine, injection_thread_function thread, bool freeze, std::function<void(injection_error)> error_handler)
+inject::inject(HWND window, injection_routine routine, injection_thread_function thread, bool freeze, std::function<void(injection_error)> error_handler)
 	: inject(routine, thread, freeze, error_handler)
 {
-	dword id = 0;
+	DWORD id = 0;
 	GetWindowThreadProcessId(window, &id);
 	this->process_id.push_back(id);
 	this->get_handles();
 }
 
-inject::inject(dword process_id, injection_routine routine, injection_thread_function thread, bool freeze, std::function<void(injection_error)> error_handler)
+inject::inject(DWORD process_id, injection_routine routine, injection_thread_function thread, bool freeze, std::function<void(injection_error)> error_handler)
 	: inject(routine, thread, freeze, error_handler)
 {
 	this->process_id.push_back(process_id);
@@ -395,7 +333,7 @@ inject::inject(dword process_id, injection_routine routine, injection_thread_fun
 
 inject::~inject()
 {
-	for (const std::pair<const dword, handle> &process : processes)
+	for (const std::pair<DWORD, HANDLE>& process : processes)
 	{
 		if (process.second)
 		{
@@ -413,222 +351,98 @@ bool inject::inject_dll(const std::vector<std::string>& dll_list)
 
 	this->suspend();
 
-	bool result = this->generic_injection([&](handle h)
-	{
-		if (this->routine == injection_routine::LOADLIBRARYA || this->routine == injection_routine::LOADLIBRARYEXA)
+	bool result = this->generic_injection([&](HANDLE h)
 		{
-			for (const std::string & dll : dll_list)
+			if (this->routine == injection_routine::LOADLIBRARYA || this->routine == injection_routine::LOADLIBRARYEXA)
 			{
-				int32_t dll_size = dll.size() + 1;
-
-				lpvoid allocated_memory_region = virtualallocex(h, dll_size);
-				if (!allocated_memory_region)
+				for (const std::string& dll : dll_list)
 				{
-					continue;
-				}
+					size_t dll_size = dll.size() + 1;
 
-				//start
-
-				do
-				{
-					if (!writeprocessmemory(h, dll, dll_size, allocated_memory_region))
-					{
-						break;
-					}
-
-					if (this->routine == injection_routine::LOADLIBRARYA)
-					{
-						if (!createandhandleremotethread(h, "kernelbase.dll", "LoadLibraryA", allocated_memory_region))
+					this->with_remote_virtual_memory(h, dll_size, [this, h](void* remote_address) {
+						if (this->routine == injection_routine::LOADLIBRARYA)
 						{
-							break;
+							remote_call(h, "kernelbase.dll", "LoadLibraryA", remote_address);
 						}
-					}
-					else if (this->routine == injection_routine::LOADLIBRARYEXA)
-					{
-						loadlibraryexa_parameter parameter;
-						parameter.address = reinterpret_cast<loadlibraryexa_t>(GetProcAddress(GetModuleHandleW(L"kernelbase.dll"), "LoadLibraryExA"));
-						parameter.filename = reinterpret_cast<char*>(allocated_memory_region);
-						parameter.file = 0;
-						parameter.flags = 0;
-
-						lpvoid function_allocated_memory_region = virtualallocex(h, external_loadlibraryex_function_size);
-						lpvoid parameter_allocated_memory_region = virtualallocex(h, sizeof(loadlibraryexa_parameter));
-						do
+						else if (this->routine == injection_routine::LOADLIBRARYEXA)
 						{
-							if (!writeprocessmemory(h, external_loadlibraryex_function, external_loadlibraryex_function_size, function_allocated_memory_region) ||
-								!writeprocessmemory(h, &parameter, sizeof(loadlibraryexa_parameter), parameter_allocated_memory_region))
-							{
-								break;
-							}
+							loadlibraryexa_parameter parameter;
+							parameter.address = reinterpret_cast<LoadLibraryExA_t>(GetProcAddress(GetModuleHandleW(L"kernelbase.dll"), "LoadLibraryExA"));
+							parameter.file_name = reinterpret_cast<char*>(remote_address);
+							parameter.file = 0;
+							parameter.flags = 0;
 
-							if (!createandhandleremotethread(h, reinterpret_cast<dword>(function_allocated_memory_region), parameter_allocated_memory_region))
-							{
-								break;
-							}
-
-						} while (false);
-
-
-						if (function_allocated_memory_region)
-						{
-							virtualfree(h, function_allocated_memory_region);
+							this->with_remote_virtual_memory(h, external_loadlibraryex_function_size, [&](void* function_allocated_memory_region)
+								{
+									this->with_remote_virtual_memory(h, sizeof(loadlibraryexa_parameter), [&](void* parameter_allocated_memory_region)
+										{
+											remote_call(h, reinterpret_cast<DWORD>(function_allocated_memory_region), parameter_allocated_memory_region);
+										}, &parameter);
+								}, external_loadlibraryex_function);
 						}
-
-						if (parameter_allocated_memory_region)
-						{
-							virtualfree(h, parameter_allocated_memory_region);
-						}
-
-						break;
-					}
-
-				} while (false);
-
-
-
-				//end
-
-				if (allocated_memory_region)
-				{
-					virtualfree(h, allocated_memory_region);
+						}, dll.c_str());
 				}
 			}
-		}
-		else if (this->routine == injection_routine::LOADLIBRARYW || this->routine == injection_routine::LOADLIBRARYEXW || this->routine == injection_routine::LDRLOADDLL)
-		{
-			for (const std::string & _dll : dll_list)
+			else if (this->routine == injection_routine::LOADLIBRARYW || this->routine == injection_routine::LOADLIBRARYEXW || this->routine == injection_routine::LDRLOADDLL)
 			{
-				std::wstring dll(_dll.begin(), _dll.end());
-				int32_t dll_size = dll.size() * 2 + 1;
-
-				lpvoid allocated_memory_region = virtualallocex(h, dll_size);
-				if (!allocated_memory_region)
+				for (const std::string& _ : dll_list)
 				{
-					continue;
-				}
+					std::wstring dll(_.begin(), _.end());
+					size_t dll_size = dll.size() * 2 + 1;
 
-				//start
 
-				do
-				{
-					if (!writeprocessmemory(h, dll, dll_size, allocated_memory_region))
-					{
-						break;
-					}
-
-					if (this->routine == injection_routine::LOADLIBRARYW)
-					{
-						if (!createandhandleremotethread(h, "kernelbase.dll", "LoadLibraryW", allocated_memory_region))
+					this->with_remote_virtual_memory(h, dll_size, [this, h](void* remote_address)
 						{
-							break;
-						}
-					}
-					else if (this->routine == injection_routine::LOADLIBRARYEXW)
-					{
-						loadlibraryexw_parameter parameter;
-						parameter.address = reinterpret_cast<loadlibraryexw_t>(GetProcAddress(GetModuleHandleW(L"kernelbase.dll"), "LoadLibraryExW"));
-						parameter.filename = reinterpret_cast<wchar_t*>(allocated_memory_region);
-						parameter.file = 0;
-						parameter.flags = 0;
-
-						lpvoid function_allocated_memory_region = virtualallocex(h, external_loadlibraryex_function_size);
-						lpvoid parameter_allocated_memory_region = virtualallocex(h, sizeof(loadlibraryexw_parameter));
-						do
-						{
-							if (!writeprocessmemory(h, external_loadlibraryex_function, external_loadlibraryex_function_size, function_allocated_memory_region) ||
-								!writeprocessmemory(h, &parameter, sizeof(loadlibraryexw_parameter), parameter_allocated_memory_region))
+							if (this->routine == injection_routine::LOADLIBRARYW)
 							{
-								break;
+								remote_call(h, "kernelbase.dll", "LoadLibraryW", remote_address);
 							}
-
-							if (!createandhandleremotethread(h, reinterpret_cast<dword>(function_allocated_memory_region), parameter_allocated_memory_region))
+							else if (this->routine == injection_routine::LOADLIBRARYEXW)
 							{
-								break;
+								loadlibraryexw_parameter parameter;
+								parameter.address = reinterpret_cast<LoadLibraryExW_t>(GetProcAddress(GetModuleHandleW(L"kernelbase.dll"), "LoadLibraryExW"));
+								parameter.file_name = reinterpret_cast<wchar_t*>(remote_address);
+								parameter.file = 0;
+								parameter.flags = 0;
+
+								this->with_remote_virtual_memory(h, external_loadlibraryex_function_size, [&](void* function_allocated_memory_region)
+									{
+										this->with_remote_virtual_memory(h, sizeof(loadlibraryexw_parameter), [&](void* parameter_allocated_memory_region)
+											{
+												remote_call(h, reinterpret_cast<DWORD>(function_allocated_memory_region), parameter_allocated_memory_region);
+											}, &parameter);
+									}, external_loadlibraryex_function);
 							}
-
-						} while (false);
-
-
-						if (function_allocated_memory_region)
-						{
-							virtualfree(h, function_allocated_memory_region);
-						}
-
-						if (parameter_allocated_memory_region)
-						{
-							virtualfree(h, parameter_allocated_memory_region);
-						}
-
-						break;
-					}
-					else if (this->routine == injection_routine::LDRLOADDLL)
-					{
-						lpvoid handle_allocated_memory_region = virtualallocex(h, sizeof(handle));
-						lpvoid unicode_string_allocated_memory_region = virtualallocex(h, sizeof(UNICODE_STRING));
-
-						ldrloaddll_parameter parameter;
-						parameter.address = reinterpret_cast<ldrloaddll_t>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "LdrLoadDll"));
-						parameter.rtlinitunicodestring = reinterpret_cast<rtlinitunicodestring_t>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlInitUnicodeString"));
-						parameter.filename = reinterpret_cast<wchar_t*>(allocated_memory_region);
-
-						parameter.pathtofile = 0;
-						parameter.flags = 0;
-						parameter.module_filename = reinterpret_cast<UNICODE_STRING*>(unicode_string_allocated_memory_region);
-						parameter.module_handle = reinterpret_cast<handle*>(handle_allocated_memory_region);
-
-						lpvoid function_allocated_memory_region = virtualallocex(h, external_ldrloaddll_function_size);
-						lpvoid parameter_allocated_memory_region = virtualallocex(h, sizeof(ldrloaddll_parameter));
-						do
-						{
-
-							if (!writeprocessmemory(h, external_ldrloaddll_function, external_ldrloaddll_function_size, function_allocated_memory_region) ||
-								!writeprocessmemory(h, &parameter, sizeof(ldrloaddll_parameter), parameter_allocated_memory_region))
+							else if (this->routine == injection_routine::LDRLOADDLL)
 							{
-								break;
+								this->with_remote_virtual_memory(h, sizeof(HANDLE), [&](void* handle_allocated_memory_region)
+									{
+										this->with_remote_virtual_memory(h, sizeof(UNICODE_STRING), [&](void* unicode_string_allocated_memory_region)
+											{
+												ldrloaddll_parameter parameter;
+												parameter.address = reinterpret_cast<LdrLoadDll_t>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "LdrLoadDll"));
+												parameter.rtl_init_unicode_string = reinterpret_cast<RtlInitUnicodeString_t>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlInitUnicodeString"));
+												parameter.file_name = reinterpret_cast<wchar_t*>(remote_address);
+
+												parameter.file_path = 0;
+												parameter.flags = 0;
+												parameter.module_file_name = reinterpret_cast<UNICODE_STRING*>(unicode_string_allocated_memory_region);
+												parameter.module_handle = reinterpret_cast<HANDLE*>(handle_allocated_memory_region);
+
+												this->with_remote_virtual_memory(h, external_ldrloaddll_function_size, [&](void* function_allocated_memory_region)
+													{
+														this->with_remote_virtual_memory(h, sizeof(ldrloaddll_parameter), [&](void* parameter_allocated_memory_region)
+															{
+																remote_call(h, reinterpret_cast<DWORD>(function_allocated_memory_region), parameter_allocated_memory_region);
+															}, &parameter);
+													}, external_ldrloaddll_function);
+											});
+									});
 							}
-
-							if (!createandhandleremotethread(h, reinterpret_cast<dword>(function_allocated_memory_region), parameter_allocated_memory_region))
-							{
-								break;
-							}
-
-						} while (false);
-
-
-						if (function_allocated_memory_region)
-						{
-							virtualfree(h, function_allocated_memory_region);
-						}
-
-						if (parameter_allocated_memory_region)
-						{
-							virtualfree(h, parameter_allocated_memory_region);
-						}
-
-						if (unicode_string_allocated_memory_region)
-						{
-							virtualfree(h, unicode_string_allocated_memory_region);
-						}
-
-						if (handle_allocated_memory_region)
-						{
-							virtualfree(h, handle_allocated_memory_region);
-						}
-
-						break;
-					}
-
-				} while (false);
-
-				//end
-
-				if (allocated_memory_region)
-				{
-					virtualfree(h, allocated_memory_region);
+						}, dll.c_str());
 				}
 			}
-		}
-	});
+		});
 
 	this->resume();
 
@@ -644,70 +458,27 @@ bool inject::map_dll(const std::vector<std::string>& dll_list)
 
 	this->suspend();
 
-	bool result = this->generic_injection([&](handle h)
-	{
-		for (const std::string &dll : dll_list)
+	bool result = this->generic_injection([&](HANDLE h)
 		{
-			handle hdll = createfile(dll);
-			if (hdll)
+			for (const std::string& dll : dll_list)
 			{
-				continue;
-			}
+				std::vector<uint8_t> dll_binary = this->read_binary_file(dll);
 
-			dword filesize = getfilesize(hdll);
-			lpvoid memory = heapalloc(filesize);
+				DWORD dll_main = get_dll_main(dll_binary.data());
 
-
-			//start
-			do
-			{
-				//fill memory with the bytes from the file
-				if (!readfile(hdll, memory, filesize))
+				if (dll_main)
 				{
-					break;
+					this->with_remote_virtual_memory(h, dll_binary.size(), [&](void* remote_address) {
+						// TODO: recalculate base addresses and get win32 api from iat
+						remote_call(h, reinterpret_cast<DWORD>(remote_address) + dll_main, 0);
+						}, dll_binary.data());
 				}
-
-				dword dllmain = getdllmain(memory);
-				if (!dllmain)
+				else
 				{
 					this->error_handler(injection_error::ERROR_DLL_MAPPING_UNSUPPORTED);
-					break;
 				}
-
-				lpvoid allocated_memory_region = virtualallocex(h, filesize);
-				if (!allocated_memory_region)
-				{
-					break;
-				}
-
-				//start
-				do
-				{
-					//write heapmemory to external memory
-					if (!writeprocessmemory(h, memory, filesize, allocated_memory_region))
-					{
-						break;
-					}
-
-					if (!createandhandleremotethread(h, reinterpret_cast<dword>(memory) + dllmain, allocated_memory_region))
-					{
-						break;
-					}
-				} while (false);
-
-				//end
-				if (allocated_memory_region)
-				{
-					virtualfree(h, allocated_memory_region);
-				}
-
-			} while (false);
-
-			//end
-			heapfree(memory);
-			closehandle(hdll);
-		}
-	});
+			}
+		});
 
 	this->resume();
 
@@ -723,7 +494,7 @@ bool inject::suspend()
 
 	bool result = true;
 
-	for (const std::pair<dword, handle> &p : processes)
+	for (const std::pair<DWORD, HANDLE>& p : processes)
 	{
 		result &= inject::suspend(p.second);
 	}
@@ -740,25 +511,25 @@ bool inject::resume()
 
 	bool result = true;
 
-	for (const std::pair<dword, handle> &p : processes)
+	for (const std::pair<DWORD, HANDLE>& p : processes)
 	{
 		result &= inject::resume(p.second);
 	}
-	
+
 	return result;
 }
 
-bool inject::suspend(handle process_handle)
+bool inject::suspend(HANDLE process_handle)
 {
-	typedef NTSTATUS(NTAPI *ntsuspendprocess_t)(IN HANDLE);
-	
+	typedef NTSTATUS(NTAPI* ntsuspendprocess_t)(IN HANDLE);
+
 	return reinterpret_cast<ntsuspendprocess_t>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtSuspendProcess"))
 		(process_handle) == STATUS_SUCCESS;
 }
 
-bool inject::resume(handle process_handle)
+bool inject::resume(HANDLE process_handle)
 {
-	typedef NTSTATUS(NTAPI *ntresumeprocess_t)(IN HANDLE);
+	typedef NTSTATUS(NTAPI* ntresumeprocess_t)(IN HANDLE);
 
 	return reinterpret_cast<ntresumeprocess_t>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtResumeProcess"))
 		(process_handle) == STATUS_SUCCESS;

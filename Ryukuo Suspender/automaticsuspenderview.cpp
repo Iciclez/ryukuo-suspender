@@ -50,8 +50,8 @@ automaticsuspenderview::automaticsuspenderview(tabcontrol *ptabcontrol, mainwind
 		
 			std::thread([&]()
 			{
-				std::unordered_set<dword> suspended_container;
-				std::vector<dword> process_id_container;
+				std::unordered_set<DWORD> suspended_container;
+				std::vector<DWORD> process_id_container;
 				while (this->m_checkbox->is_checked())
 				{
 					process_id_container = inject::get_process_id(this->m_textbox->get_text());
@@ -60,12 +60,12 @@ automaticsuspenderview::automaticsuspenderview(tabcontrol *ptabcontrol, mainwind
 						Sleep(std::stoi(this->m_numericupdown->get_text()) > 0 ?
 							std::stoi(this->m_numericupdown->get_text()) : 333);
 
-						for (dword process_id : process_id_container)
+						for (DWORD process_id : process_id_container)
 						{
 							if (!suspended_container.count(process_id))
 							{
 								this->log(FOUND, process_id, this->m_textbox->get_text());
-								handle process = OpenProcess(PROCESS_ALL_ACCESS, FALSE, process_id);
+								HANDLE process = OpenProcess(PROCESS_ALL_ACCESS, FALSE, process_id);
 								if (process)
 								{
 									inject::suspend(process);
@@ -90,11 +90,11 @@ automaticsuspenderview::automaticsuspenderview(tabcontrol *ptabcontrol, mainwind
 			this->m_textbox->set_enabled(true);
 			this->m_numericupdown->set_enabled(true);
 
-			std::vector<dword> process_id_container = inject::get_process_id(this->m_textbox->get_text());
-			for (dword process_id : process_id_container)
+			std::vector<DWORD> process_id_container = inject::get_process_id(this->m_textbox->get_text());
+			for (DWORD process_id : process_id_container)
 			{
 				this->log(FOUND, process_id, this->m_textbox->get_text());
-				handle process = OpenProcess(PROCESS_ALL_ACCESS, FALSE, process_id);
+				HANDLE process = OpenProcess(PROCESS_ALL_ACCESS, FALSE, process_id);
 				if (process)
 				{
 					inject::resume(process);
